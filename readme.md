@@ -84,4 +84,9 @@ SUPABASE_SERVICE_KEY=＜service-role-key＞
 # app.pyでサービスロールクライアントを使用
 sb_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 # このクライアントでデータを挿入することでRLSをバイパス
-``` 
+```
+
+## 課題
+1. Googleアカウントでの認証機能実装
+2. 新規で/dashboardページを作成し、認証されたuserは/dashboardへリダイレクト
+3. 認証されていないuserは認証ページへリダイレクト
