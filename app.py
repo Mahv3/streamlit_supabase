@@ -6,6 +6,13 @@ import streamlit as st
 from supabase import create_client, Client
 import urllib.parse
 import time
+from streamlit_extras.switch_page_button import switch_page
+
+# --- 🔰 ページの最初に置く ― 最優先でリダイレクト判定 ----------
+if st.session_state.get("redirect_to_dashboard"):
+    st.session_state.redirect_to_dashboard = False  # ループ防止
+    switch_page("dashboard")  # ファイル名ではなくページ名
+# ----------------------------------------------------------------
 
 # 1) 環境変数ロード
 load_dotenv()
@@ -36,71 +43,50 @@ def get_google_oauth_url():
 
 # URLからアクセストークンを取得
 def process_google_callback():
-    query_params = st.query_params
-    
-    # デバッグ情報
-    st.sidebar.write("クエリパラメータ:", dict(query_params))
-    
-    # アクセストークンが含まれているか確認
-    if "access_token" in query_params:
-        st.sidebar.success("✓ アクセストークンを検出")
-        access_token = query_params["access_token"]
-        try:
-            # アクセストークンを使用してログイン
-            res = sb.auth.get_user(access_token)
-            if res.user:
-                st.sidebar.success("✓ ユーザー情報を取得")
-                
-                # セッションにユーザー情報を保存
-                st.session_state.user = res.user
-                st.session_state.token = access_token
-                
-                # ユーザーをユーザーテーブルに登録
-                try:
-                    ensure_user_record(sb, res.user)
-                    st.sidebar.success("✓ ユーザープロファイル作成")
-                except Exception as db_err:
-                    st.sidebar.warning(f"プロファイル作成エラー (無視可): {str(db_err)}")
-                
-                # クエリパラメータを削除するためリダイレクト
-                st.sidebar.info("ページを再読み込みします...")
-                time.sleep(1)  # 少し待機して情報を表示
-                st.rerun()
-                return True
-            else:
-                st.sidebar.error("✗ ユーザー情報が取得できませんでした")
-        except Exception as e:
-            st.sidebar.error(f"✗ 認証エラー: {str(e)}")
-    else:
-        # URLハッシュフラグメント（#以降）からアクセストークンを取得するJavaScript
-        st.markdown("""
-        <script>
-            document.addEventListener('DOMContentLoaded', function() {
-                // URLハッシュがある場合
-                if (window.location.hash) {
-                    console.log("Hash detected:", window.location.hash);
-                    
-                    // #を除去
-                    const hash = window.location.hash.substring(1);
-                    
-                    // URLパラメータを解析
-                    const params = {};
-                    hash.split('&').forEach(function(part) {
-                        const item = part.split('=');
-                        params[item[0]] = decodeURIComponent(item[1]);
-                    });
-                    
-                    // アクセストークンがあれば
-                    if (params.access_token) {
-                        console.log("Access token found, redirecting...");
-                        
-                        // クエリパラメータとしてリダイレクト
-                        window.location.href = window.location.pathname + "?access_token=" + params.access_token;
-                    }
+    # JavaScriptで#access_tokenを?access_tokenに変換
+    st.markdown("""
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const hash = window.location.hash;
+            if (hash && hash.includes("access_token")) {
+                const query = new URLSearchParams(hash.substring(1));
+                const token = query.get("access_token");
+                if (token) {
+                    const newUrl = `${window.location.pathname}?access_token=${token}`;
+                    window.location.replace(newUrl);
                 }
-            });
-        </script>
-        """, unsafe_allow_html=True)
+            }
+        });
+    </script>
+    """, unsafe_allow_html=True)
+
+    # クエリパラメータからトークンを取得
+    if "access_token" not in st.query_params:
+        return False  # JavaScriptでの変換を待つ
+
+    access_token = st.query_params["access_token"]
+    try:
+        # ユーザー情報を取得
+        res = sb.auth.get_user(access_token)
+        if res.user:
+            # セッションにユーザー情報を保存
+            st.session_state.user = res.user
+            st.session_state.token = access_token
+            st.session_state.auth_method = "google"
+            
+            # ユーザーレコードを作成
+            try:
+                ensure_user_record(sb, res.user)
+            except Exception as db_err:
+                st.sidebar.warning(f"プロファイル作成エラー: {str(db_err)}")
+            
+            # リダイレクトフラグを立てて再読み込み
+            st.session_state.redirect_to_dashboard = True
+            st.experimental_set_query_params()  # URLからtokenを消す
+            st.rerun()
+            return True
+    except Exception as e:
+        st.error(f"認証エラー: {str(e)}")
     
     return False
 
@@ -126,7 +112,8 @@ if "user" not in st.session_state:
             res = sb.auth.sign_in_with_password({"email": email, "password": pw})
             if res.user:
                 st.session_state.user = res.user
-                st.rerun()  # 新しいAPI
+                st.session_state.auth_method = "email"  # 認証方法を記録
+                st.rerun()
             else:
                 st.error("認証に失敗しました")
 
@@ -157,32 +144,22 @@ if "user" not in st.session_state:
 user = st.session_state.user
 st.sidebar.success(f"ログイン中: {user.email}")
 
+# ログイン後は、ユーザーレコードを確認
 ensure_user_record(sb, user)
 
+# 認証成功メッセージ
+auth_method = st.session_state.get("auth_method", "email")
+st.success(f"認証に成功しました（{auth_method}）！ダッシュボードに移動します...")
 
-# 同一ファイルの続き
-
-from langchain.embeddings import OpenAIEmbeddings
-from langchain_community.vectorstores import SupabaseVectorStore
-from langchain_core.documents import Document  # Document クラスをインポート
-
-# 6) LangChain 準備
-emb = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
-vs = SupabaseVectorStore(
-    client=sb,  # 既存のSupabaseクライアントを使用
-    embedding=emb,
-    table_name="documents"
-)
-
-# 7) ドキュメント保存 UI
-st.header("ドキュメント保存")
-content = st.text_area("保存したいテキストを入力")
-if st.button("保存"):
-    # Document クラスのインスタンスを作成
-    doc = Document(
-        page_content=content,
-        metadata={"user_id": user.email}  # idの代わりにemailを使用
-    )
-    # ドキュメントを追加
-    vs.add_documents([doc])
-    st.success("Supabase の documents テーブルに保存しました！")
+# アプリケーションの最後に配置
+# ダッシュボードへの遷移（Google認証後も含む）
+if st.session_state.get("redirect_to_dashboard"):
+    # フラグをリセット（無限ループ防止）
+    del st.session_state["redirect_to_dashboard"]
+    
+    # 二段階目：安定した状態からページ遷移
+    try:
+        st.switch_page("pages/dashboard.py")
+    except Exception as e:
+        st.error(f"ページ遷移エラー: {str(e)}")
+        st.page_link("pages/dashboard.py", label="手動でダッシュボードへ", icon="🧭")
